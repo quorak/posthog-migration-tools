@@ -1,3 +1,4 @@
+import json
 from migrate import main
 from aiochclient import ChClient
 import responses
@@ -27,7 +28,47 @@ async def test_can_migrate_events_to_posthog():
             (
                 "00000000-0000-0000-0000-000000000000",
                 "test",
-                '{"$browser":"Chrome","$browser_version":"90.0.4430.93","$current_url":"http://localhost:8000/","$device_id":"00000000-0000-0000-0000-000000000000","$device_type":"desktop","$initial_referrer":"http://localhost:8000/","$initial_referring_domain":"localhost","$lib":"web","$lib_version":"1.24.0","$os":"Mac OS X","$os_version":"10.15.7","$referrer":"http://localhost:8000/","$referring_domain":"localhost","$screen_height":900,"$screen_width":1440,"$user_agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) PostHog/1.24.0 Chrome/90.0.4430.93 Electron/12.0.7 Safari/537.36","distinct_id":"00000000-0000-0000-0000-000000000000","elements":[{"attr__class":"ant-btn","attr__href":"/signup","attr__role":"button","attr__title":"Sign up","tag_name":"a","text":"Sign up"}],"event":"$pageview","properties":{"$current_url":"http://localhost:8000/","$initial_referrer":"http://localhost:8000/","$initial_referring_domain":"localhost","$referrer":"http://localhost:8000/","$referring_domain":"localhost"},"timestamp":"2021-05-05T16:00:00.000000Z","type":"$autocapture"}',
+                json.dumps(
+                    properties1 := {
+                        "$browser": "Chrome",
+                        "$browser_version": "90.0.4430.93",
+                        "$current_url": "http://localhost:8000/",
+                        "$device_id": "00000000-0000-0000-0000-000000000000",
+                        "$device_type": "desktop",
+                        "$initial_referrer": "http://localhost:8000/",
+                        "$initial_referring_domain": "localhost",
+                        "$lib": "web",
+                        "$lib_version": "1.24.0",
+                        "$os": "Mac OS X",
+                        "$os_version": "10.15.7",
+                        "$referrer": "http://localhost:8000/",
+                        "$referring_domain": "localhost",
+                        "$screen_height": 900,
+                        "$screen_width": 1440,
+                        "$user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) PostHog/1.24.0 Chrome/90.0.4430.93 Electron/12.0.7 Safari/537.36",
+                        "distinct_id": "00000000-0000-0000-0000-000000000000",
+                        "elements": [
+                            {
+                                "attr__class": "ant-btn",
+                                "attr__href": "/signup",
+                                "attr__role": "button",
+                                "attr__title": "Sign up",
+                                "tag_name": "a",
+                                "text": "Sign up",
+                            }
+                        ],
+                        "event": "$pageview",
+                        "properties": {
+                            "$current_url": "http://localhost:8000/",
+                            "$initial_referrer": "http://localhost:8000/",
+                            "$initial_referring_domain": "localhost",
+                            "$referrer": "http://localhost:8000/",
+                            "$referring_domain": "localhost",
+                        },
+                        "timestamp": "2021-05-05T16:00:00.000000Z",
+                        "type": "$autocapture",
+                    }
+                ),
                 datetime.datetime(2021, 5, 5, 16, 0, 0),
                 team_id,
                 "00000000-0000-0000-0000-000000000000",
@@ -38,7 +79,47 @@ async def test_can_migrate_events_to_posthog():
             (
                 "00000000-0000-0000-0000-000000000001",
                 "test",
-                '{"$browser":"Chrome","$browser_version":"90.0.4430.93","$current_url":"http://localhost:8000/","$device_id":"00000000-0000-0000-0000-000000000000","$device_type":"desktop","$initial_referrer":"http://localhost:8000/","$initial_referring_domain":"localhost","$lib":"web","$lib_version":"1.24.0","$os":"Mac OS X","$os_version":"10.15.7","$referrer":"http://localhost:8000/","$referring_domain":"localhost","$screen_height":900,"$screen_width":1440,"$user_agent":"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) PostHog/1.24.0 Chrome/90.0.4430.93 Electron/12.0.7 Safari/537.36","distinct_id":"00000000-0000-0000-0000-000000000000","elements":[{"attr__class":"ant-btn","attr__href":"/signup","attr__role":"button","attr__title":"Sign up","tag_name":"a","text":"Sign up"}],"event":"$pageview","properties":{"$current_url":"http://localhost:8000/","$initial_referrer":"http://localhost:8000/","$initial_referring_domain":"localhost","$referrer":"http://localhost:8000/","$referring_domain":"localhost"},"timestamp":"2021-05-05T16:00:00.000000Z","type":"$autocapture"}',
+                json.dumps(
+                    properties2 := {
+                        "$browser": "Chrome",
+                        "$browser_version": "90.0.4430.93",
+                        "$current_url": "http://localhost:8000/",
+                        "$device_id": "00000000-0000-0000-0000-000000000000",
+                        "$device_type": "desktop",
+                        "$initial_referrer": "http://localhost:8000/",
+                        "$initial_referring_domain": "localhost",
+                        "$lib": "web",
+                        "$lib_version": "1.24.0",
+                        "$os": "Mac OS X",
+                        "$os_version": "10.15.7",
+                        "$referrer": "http://localhost:8000/",
+                        "$referring_domain": "localhost",
+                        "$screen_height": 900,
+                        "$screen_width": 1440,
+                        "$user_agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) PostHog/1.24.0 Chrome/90.0.4430.93 Electron/12.0.7 Safari/537.36",
+                        "distinct_id": "00000000-0000-0000-0000-000000000000",
+                        "elements": [
+                            {
+                                "attr__class": "ant-btn",
+                                "attr__href": "/signup",
+                                "attr__role": "button",
+                                "attr__title": "Sign up",
+                                "tag_name": "a",
+                                "text": "Sign up",
+                            }
+                        ],
+                        "event": "$pageview",
+                        "properties": {
+                            "$current_url": "http://localhost:8000/",
+                            "$initial_referrer": "http://localhost:8000/",
+                            "$initial_referring_domain": "localhost",
+                            "$referrer": "http://localhost:8000/",
+                            "$referring_domain": "localhost",
+                        },
+                        "timestamp": "2021-05-05T16:00:00.000000Z",
+                        "type": "$autocapture",
+                    }
+                ),
                 datetime.datetime(2021, 5, 5, 16, 0, 0),
                 team_id,
                 "00000000-0000-0000-0000-000000000000",
@@ -50,6 +131,13 @@ async def test_can_migrate_events_to_posthog():
 
         # Run the migration script
         with responses.RequestsMock() as rsps:
+            rsps.add(
+                responses.POST,
+                "http://localhost:8000/batch/",
+                json={"status": "ok"},
+                status=200,
+            )
+
             await main(
                 sys_args=[
                     "--clickhouse-host",
@@ -67,14 +155,37 @@ async def test_can_migrate_events_to_posthog():
                     "--team-id",
                     "1",
                     "--start-date",
-                    "2021-05-04T16:00:00",
+                    "2021-05-04",
                     "--end-date",
-                    "2021-05-06T16:00:00",
+                    "2021-05-06",
                 ]
             )
 
-            # Check that the correct requests were made to PostHog
+            # Check that the correct requests were made to PostHog with the
+            # right data
             assert len(rsps.calls) == 1
+            assert rsps.calls[0].request.url == "http://localhost:8000/batch/"
+            assert rsps.calls[0].request.method == responses.POST
+            body_json = json.loads(rsps.calls[0].request.body)
+
+            # Check we include the token
+            assert body_json["api_key"] == "test"
+
+            # Check we include the right events
+            assert body_json["batch"][0] == {
+                "distinct_id": "00000000-0000-0000-0000-000000000000",
+                "event": "test",
+                "properties": {
+                    **properties1,
+                    # These are a little annoying but not the end of the world, I'll
+                    # add something to the readme about it.
+                    "$lib": "posthog-python",
+                    "$lib_version": "3.0.1",
+                    "$geoip_disable": True,  # This makes sense, it shouldn't do geoip again
+                },
+                "context": {},  # I don't know what this one is but it seems to get added
+                "timestamp": "2021-05-05T16:00:00+00:00",
+            }
 
 
 async def setup_clickhouse_schema(client: ChClient):

@@ -12,3 +12,6 @@ To aid in getting people moved over, this tool:
 Why pull directly from ClickHouse? Mainly, it removes the requirement to have a
 working installation of PostHog down to just needing to have ClickHouse
 responsive. It will also help with performance.
+
+NOTE: this script will add a $lib = posthog-python property, overriding anything
+else that was already there.
