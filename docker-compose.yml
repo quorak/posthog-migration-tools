@@ -1,0 +1,9 @@
+# Docker compose with clickhouse only, to aid in testing the tool
+version: '3.7'
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server
+    ports:
+      - 8123:8123
+      - 9000:9000
