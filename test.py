@@ -18,8 +18,10 @@ async def test_can_migrate_events_to_posthog():
     async with ChClient() as client:
         await setup_clickhouse_schema(client)
 
-        # Add some events to the sharded_events table
-        team_id = 1
+        # Add some events to the sharded_events table. We use the max value for
+        # the team_id + 1 to ensure we don't collide with any existing events.
+        rows = await client.fetchrow("SELECT max(team_id) FROM test.events")
+        team_id = rows[0] if rows is not None else 0
         await client.execute(
             """
             INSERT INTO test.events
@@ -120,11 +122,11 @@ async def test_can_migrate_events_to_posthog():
                         "type": "$autocapture",
                     }
                 ),
-                datetime.datetime(2021, 5, 5, 16, 0, 0),
+                datetime.datetime(2021, 5, 5, 16, 2, 0),
                 team_id,
                 "00000000-0000-0000-0000-000000000000",
-                datetime.datetime(2021, 5, 5, 16, 0, 0),
-                datetime.datetime(2021, 5, 5, 16, 0, 0),
+                datetime.datetime(2021, 5, 5, 16, 2, 0),
+                datetime.datetime(2021, 5, 5, 16, 2, 0),
                 1,
             ),
         )
@@ -153,11 +155,12 @@ async def test_can_migrate_events_to_posthog():
                     "--posthog-api-token",
                     "test",
                     "--team-id",
-                    "1",
+                    str(team_id),
                     "--start-date",
                     "2021-05-04",
                     "--end-date",
                     "2021-05-06",
+                    "--verbose",
                 ]
             )
 
@@ -187,17 +190,236 @@ async def test_can_migrate_events_to_posthog():
                 "timestamp": "2021-05-05T16:00:00+00:00",
             }
 
+        # Check we don't include events before the start date
+        with responses.RequestsMock() as rsps:
+            await main(
+                sys_args=[
+                    "--clickhouse-host",
+                    "localhost",
+                    "--clickhouse-user",
+                    "default",
+                    "--clickhouse-password",
+                    "",
+                    "--clickhouse-database",
+                    "test",
+                    "--posthog-host",
+                    "http://localhost:8000",
+                    "--posthog-api-token",
+                    "test",
+                    "--team-id",
+                    str(team_id),
+                    "--start-date",
+                    "2021-05-06",
+                    "--end-date",
+                    "2021-05-07",
+                    "--verbose",
+                ]
+            )
+
+            # Check that the correct requests were made to PostHog with the
+            # right data
+            assert len(rsps.calls) == 0
+
+        # Check we don't include events after the end date
+        with responses.RequestsMock() as rsps:
+            await main(
+                sys_args=[
+                    "--clickhouse-host",
+                    "localhost",
+                    "--clickhouse-user",
+                    "default",
+                    "--clickhouse-password",
+                    "",
+                    "--clickhouse-database",
+                    "test",
+                    "--posthog-host",
+                    "http://localhost:8000",
+                    "--posthog-api-token",
+                    "test",
+                    "--team-id",
+                    str(team_id),
+                    "--start-date",
+                    "2021-05-03",
+                    "--end-date",
+                    "2021-05-04",
+                    "--verbose",
+                ]
+            )
+
+            # Check that the correct requests were made to PostHog with the
+            # right data
+            assert len(rsps.calls) == 0
+
+        # Check we don't include events from other teams
+        with responses.RequestsMock() as rsps:
+            await main(
+                sys_args=[
+                    "--clickhouse-host",
+                    "localhost",
+                    "--clickhouse-user",
+                    "default",
+                    "--clickhouse-password",
+                    "",
+                    "--clickhouse-database",
+                    "test",
+                    "--posthog-host",
+                    "http://localhost:8000",
+                    "--posthog-api-token",
+                    "test",
+                    "--team-id",
+                    str(team_id + 1),
+                    "--start-date",
+                    "2021-05-04",
+                    "--end-date",
+                    "2021-05-06",
+                    "--verbose",
+                ]
+            )
+
+            # Check that the correct requests were made to PostHog with the
+            # right data
+            assert len(rsps.calls) == 0
+
+        # Check we get a cursor back from migrate that we can use in subsequent
+        # calls to migrate
+        with responses.RequestsMock() as rsps:
+            rsps.add(
+                responses.POST,
+                "http://localhost:8000/batch/",
+                json={"status": "ok"},
+                status=200,
+            )
+
+            cursor, _ = await main(
+                sys_args=[
+                    "--clickhouse-host",
+                    "localhost",
+                    "--clickhouse-user",
+                    "default",
+                    "--clickhouse-password",
+                    "",
+                    "--clickhouse-database",
+                    "test",
+                    "--posthog-host",
+                    "http://localhost:8000",
+                    "--posthog-api-token",
+                    "test",
+                    "--team-id",
+                    str(team_id),
+                    "--start-date",
+                    "2021-05-05T16:00:00",
+                    "--end-date",
+                    "2021-05-05T16:01:00",  # Before the second event
+                    "--verbose",
+                ]
+            )
+
+            # Check that the correct requests were made to PostHog with the
+            # right data
+            assert len(rsps.calls) == 1
+            assert rsps.calls[0].request.url == "http://localhost:8000/batch/"
+            assert rsps.calls[0].request.method == responses.POST
+            body_json = json.loads(rsps.calls[0].request.body)
+
+            # Check we include the token
+            assert body_json["api_key"] == "test"
+
+            # Check we include the first event only
+            assert body_json["batch"] == [
+                {
+                    "distinct_id": "00000000-0000-0000-0000-000000000000",
+                    "event": "test",
+                    "properties": {
+                        **properties1,
+                        # These are a little annoying but not the end of the world, I'll
+                        # add something to the readme about it.
+                        "$lib": "posthog-python",
+                        "$lib_version": "3.0.1",
+                        "$geoip_disable": True,  # This makes sense, it shouldn't do geoip again
+                    },
+                    "context": {},  # I don't know what this one is but it seems to get added
+                    "timestamp": "2021-05-05T16:00:00+00:00",
+                }
+            ]
+
+            assert cursor
+
+        # Now use the cursor to get the second event only
+        with responses.RequestsMock() as rsps:
+            rsps.add(
+                responses.POST,
+                "http://localhost:8000/batch/",
+                json={"status": "ok"},
+                status=200,
+            )
+
+            await main(
+                sys_args=[
+                    "--clickhouse-host",
+                    "localhost",
+                    "--clickhouse-user",
+                    "default",
+                    "--clickhouse-password",
+                    "",
+                    "--clickhouse-database",
+                    "test",
+                    "--posthog-host",
+                    "http://localhost:8000",
+                    "--posthog-api-token",
+                    "test",
+                    "--team-id",
+                    str(team_id),
+                    "--cursor",
+                    cursor,
+                    "--start-date",
+                    "2021-05-05T16:00:00",
+                    "--end-date",
+                    "2021-05-05T16:03:00",
+                    "--verbose",
+                ]
+            )
+
+            # Check that the correct requests were made to PostHog with the
+            # right data
+            assert len(rsps.calls) == 1
+            assert rsps.calls[0].request.url == "http://localhost:8000/batch/"
+            assert rsps.calls[0].request.method == responses.POST
+            body_json = json.loads(rsps.calls[0].request.body)
+
+            # Check we include the token
+            assert body_json["api_key"] == "test"
+
+            # Check we include the second event only
+            assert body_json["batch"] == [
+                {
+                    "distinct_id": "00000000-0000-0000-0000-000000000000",
+                    "event": "test",
+                    "properties": {
+                        **properties2,
+                        # These are a little annoying but not the end of the world, I'll
+                        # add something to the readme about it.
+                        "$lib": "posthog-python",
+                        "$lib_version": "3.0.1",
+                        "$geoip_disable": True,  # This makes sense, it shouldn't do geoip again
+                    },
+                    "context": {},  # I don't know what this one is but it seems to get added
+                    "timestamp": "2021-05-05T16:02:00+00:00",
+                }
+            ]
+
 
 async def setup_clickhouse_schema(client: ChClient):
-    # Setup ClickHouse. We don't actually create the distributed table but
-    # rather just the MergeTree table as `events`. It's not exactly the same as
-    # production but it's close enough for testing, and avoids needing
-    # zookeeper.
-    #
-    # One thing we wouldn't be able to test is the interplay between multiple
-    # shards and how that affects cursoring through.
+    """
+    Setup ClickHouse. We don't actually create the distributed table but
+    rather just the MergeTree table as `events`. It's not exactly the same as
+    production but it's close enough for testing, and avoids needing
+    zookeeper.
+
+    One thing we wouldn't be able to test is the interplay between multiple
+    shards and how that affects cursoring through.
+    """
     await client.execute("CREATE DATABASE IF NOT EXISTS test")
-    await client.execute("DROP TABLE IF EXISTS events")
+    await client.execute("DROP TABLE IF EXISTS test.events")
     await client.execute(
         """
         CREATE TABLE IF NOT EXISTS test.events (

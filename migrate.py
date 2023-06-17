@@ -17,21 +17,34 @@
 
 import argparse
 import asyncio
+import base64
+import contextlib
+import dataclasses
 import json
 import logging
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 import sys
 from typing import Any, List, Optional, Tuple
+from uuid import UUID
 
 from aiochclient import ChClient
 
+from aiochclient.types import py2ch
+
 from posthog import Posthog
 
-logging.basicConfig(level=logging.INFO)
+logging.basicConfig()
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 def parse_args(sys_args: Optional[List[str]] = None) -> argparse.Namespace:
+    """
+    Parse command line arguments.
+
+    :param sys_args: The arguments to parse. Defaults to `sys.argv`.
+    :return: The parsed arguments.
+    """
     parser = argparse.ArgumentParser(
         description="Migrate data from ClickHouse to PostHog Cloud. This tool is intended to be used for self-hosted instances of PostHog."
     )
@@ -88,6 +101,11 @@ def parse_args(sys_args: Optional[List[str]] = None) -> argparse.Namespace:
         help="The date to stop migrating at. Defaults to today.",
     )
     parser.add_argument(
+        "--cursor",
+        type=str,
+        help="The cursor to start migrating from. If provided, this will override the start date.",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=1000,
@@ -103,31 +121,113 @@ def parse_args(sys_args: Optional[List[str]] = None) -> argparse.Namespace:
         action="store_true",
         help="If set, the script will output debug information.",
     )
-    return parser.parse_args(sys_args)
+    return parser.parse_args(sys_args or sys.argv[1:])
 
 
-def get_clickhouse_client(
-    host: str, user: str, password: str, database: str
-) -> ChClient:
-    return ChClient(
+@contextlib.asynccontextmanager
+async def get_clickhouse_client(host: str, user: str, password: str, database: str):
+    """
+    Get a ClickHouse client. This client is used to stream events from
+    ClickHouse. Note that we don't support e.g. SSL connections to ClickHouse or
+    any other advanced configuration. The client is intended to be used e.g.
+    against a port-forwarded ClickHouse instance hosted on a Kubernetes cluster
+    i.e. how existing self-hosted instances of PostHog are configured.
+
+    :param host: The host of the ClickHouse instance to connect to.
+    :param user: The user to use to connect to ClickHouse.
+    :param password: The password to use to connect to ClickHouse.
+    :param database: The database to use to connect to ClickHouse.
+    :return: A ClickHouse client.
+    """
+    client = ChClient(
         url=f"http://{host}:8123/", user=user, password=password, database=database
     )
+    yield client
+    await client.close()
 
 
 def get_posthog_client(host: str, api_token: str) -> Posthog:
+    """
+    Get a PostHog client. This client is used to send events to PostHog Cloud.
+
+    :param host: The host of the PostHog instance to connect to.
+    :param api_token: The API token to use to connect to PostHog.
+    :return: A PostHog client.
+    """
     return Posthog(api_key=api_token, host=host)
 
 
 def get_start_date(start_date: Optional[str]) -> datetime:
+    """
+    Get the start date to migrate from. If no start date is provided, we default
+    to 30 days ago.
+
+    :param start_date: The start date to migrate from.
+    :return: The start date to migrate from.
+    """
     if start_date:
-        return datetime.strptime(start_date, "%Y-%m-%d")
+        return datetime.fromisoformat(start_date)
     return datetime.now() - timedelta(days=30)
 
 
 def get_end_date(end_date: Optional[str]) -> datetime:
+    """
+    Get the end date to migrate to. If no end date is provided, we default to
+    today.
+
+    :param end_date: The end date to migrate to.
+    :return: The end date to migrate to.
+    """
     if end_date:
-        return datetime.strptime(end_date, "%Y-%m-%d")
+        return datetime.fromisoformat(end_date)
     return datetime.now()
+
+
+@dataclasses.dataclass
+class Cursor:
+    """
+    A cursor is used to resume a migration. It contains the timestamp, event,
+    and distinct ID hash of the last event that was migrated.
+
+    NOTE: this looks a little overkill to have this class. It is. We originally
+    had a more complex cursor that included all columns of the events table sort
+    key.
+    """
+
+    timestamp: date
+    uuid: UUID
+
+
+def marshal_cursor(cursor) -> str:
+    """
+    Convert the cursor to a string. This string can be used to resume a
+    migration. We encode dates as ISO 8601 strings.
+
+    :return: The cursor as a string.
+    """
+    return base64.b64encode(
+        json.dumps(
+            {
+                "timestamp": cursor.timestamp.isoformat(),
+                "uuid": int(cursor.uuid),
+            }
+        ).encode()
+    ).decode()
+
+
+def unmarshal_cursor(cursor: str) -> "Cursor":
+    """
+    Convert a cursor string to a cursor. We decode dates from ISO 8601 strings.
+
+    :param cursor: The cursor as a string.
+    :return: The cursor.
+    """
+    decoded = base64.b64decode(cursor.encode())
+    json_data = json.loads(decoded)
+    return Cursor(
+        timestamp=datetime.fromisoformat(json_data["timestamp"]),
+        uuid=UUID(int=json_data["uuid"]),
+    )
 
 
 async def migrate_events(
@@ -136,114 +236,174 @@ async def migrate_events(
     team_id: int,
     start_date: datetime,
     end_date: datetime,
+    cursor: Optional[Cursor],
     batch_size: int,
     dry_run: bool,
 ) -> Tuple[Any, int]:
-    # We use the iterator API to stream data from ClickHouse. This is the
-    # fastest way to get data out of ClickHouse, and it also allows us to
-    # resume the migration if it fails.
-    #
-    # We use the `timestamp` column to resume the migration. This column is
-    # indexed, so it's very fast to query.
-    #
-    # We use the `batch` method to send events to PostHog Cloud. This allows us
-    # to send events in batches of 1000, which is the maximum allowed by
-    # PostHog Cloud.
-    #
-    # We use the `dry_run` flag to test the migration without sending any
-    # events to PostHog Cloud.
-    #
-    # We use the `verbose` flag to output debug information.
-    #
-    # We output the last timestamp that was migrated to stdout. This can be
-    # used to resume the migration by setting `--start-date` to the last
-    # timestamp that was migrated.
-    #
-    # We use the `batch_size` parameter to control the number of events to
-    # batch together when sending to PostHog Cloud.
-    #
-    # We use the `start_date` and `end_date` parameters to control the range of
-    # dates to migrate. This is useful to resume the migration if it fails.
-    # This also allows us to migrate a subset of the data, which is useful for
-    # testing.
-    #
-    # We use the `total_events` variable to keep track of the total number of
-    # events that were migrated. This is useful to know how many events were
-    # migrated in total.
-    #
-    # We use the entire sort key value to cursor the migration. The sort key may
-    # not be unique if the migration is resumed, so we need to use the entire
-    # sort key to ensure that we don't skip any events.
+    """
+    We use the iterator API to stream data from ClickHouse. This is the
+    fastest way to get data out of ClickHouse, and it also allows us to
+    resume the migration if it fails.
 
-    # Stream events from ClickHouse. We use the sort key as the ordering to
-    # ensure that ClickHouse is able to stream data in a memory efficient way.
-    #
-    # The events table in ClickHouse has the following schema:
-    #
-    # CREATE TABLE sharded_events (
-    #     `uuid` UUID,
-    #     `event` String,
-    #     `properties` String CODEC(ZSTD(3)),
-    #     `timestamp` DateTime64(6, 'UTC'),
-    #     `team_id` Int64,
-    #     `distinct_id` String,
-    #     `elements_hash` String,
-    #     `created_at` DateTime64(6, 'UTC'),
-    #     `_timestamp` DateTime,
-    #     `_offset` UInt64,
-    # ) ENGINE = ReplicatedReplacingMergeTree(
-    #     '/clickhouse/prod/tables/{shard}/posthog.sharded_events',
-    #     '{replica}',
-    #     _timestamp
-    # ) PARTITION BY toYYYYMM(timestamp)
-    # ORDER BY (
-    #         team_id,
-    #         toDate(timestamp),
-    #         event,
-    #         cityHash64(distinct_id),
-    #         cityHash64(uuid)
-    #     )
-    #
-    # The `events` table which we will query is a Disrtibuted table over the top
-    # of the `sharded_events` table. This allows us to query all of the shards
-    # in parallel.
-    #
-    # Periodically we call flush to ensure the data has been flushed to PostHog,
-    # and only after this do we update the last cursor value.
+    We use the `timestamp` column to resume the migration. This column is
+    indexed, so it's very fast to query.
+
+    We use the `batch` method to send events to PostHog Cloud. This allows us
+    to send events in batches of 1000, which is the maximum allowed by
+    PostHog Cloud.
+
+    We use the `dry_run` flag to test the migration without sending any
+    events to PostHog Cloud.
+
+    We use the `verbose` flag to output debug information.
+
+    We output the last timestamp that was migrated to stdout. This can be
+    used to resume the migration by setting `--start-date` to the last
+    timestamp that was migrated.
+
+    We use the `batch_size` parameter to control the number of events to
+    batch together when sending to PostHog Cloud.
+
+    We use the `start_date` and `end_date` parameters to control the range of
+    dates to migrate. This is useful to resume the migration if it fails.
+    This also allows us to migrate a subset of the data, which is useful for
+    testing.
+
+    We use the `total_events` variable to keep track of the total number of
+    events that were migrated. This is useful to know how many events were
+    migrated in total.
+
+    We use the entire sort key value to cursor the migration. The sort key may
+    not be unique if the migration is resumed, so we need to use the entire
+    sort key to ensure that we don't skip any events.
+
+    Stream events from ClickHouse. We use the sort key as the ordering to
+    ensure that ClickHouse is able to stream data in a memory efficient way.
+
+    The events table in ClickHouse has the following schema:
+
+    CREATE TABLE sharded_events (
+        `uuid` UUID,
+        `event` String,
+        `properties` String CODEC(ZSTD(3)),
+        `timestamp` DateTime64(6, 'UTC'),
+        `team_id` Int64,
+        `distinct_id` String,
+        `elements_hash` String,
+        `created_at` DateTime64(6, 'UTC'),
+        `_timestamp` DateTime,
+        `_offset` UInt64,
+    ) ENGINE = ReplicatedReplacingMergeTree(
+        '/clickhouse/prod/tables/{shard}/posthog.sharded_events',
+        '{replica}',
+        _timestamp
+    ) PARTITION BY toYYYYMM(timestamp)
+    ORDER BY (
+            team_id,
+            toDate(timestamp),
+            event,
+            cityHash64(distinct_id),
+            cityHash64(uuid)
+        )
+
+    The `events` table which we will query is a Disrtibuted table over the top
+    of the `sharded_events` table. This allows us to query all of the shards
+    in parallel.
+
+    Periodically we call flush to ensure the data has been flushed to PostHog,
+    and only after this do we update the last cursor value.
+
+    :param clickhouse_client: The ClickHouse client to use to query events.
+    :param posthog_client: The PostHog client to use to send events.
+    :param team_id: The team ID to migrate events for.
+    :param start_date: The start date to migrate from.
+    :param end_date: The end date to migrate to.
+    :param cursor: The cursor to resume the migration from.
+    :param batch_size: The number of events to batch together when sending to
+        PostHog Cloud.
+    :param dry_run: Whether to run the migration in dry run mode.
+    :return: The last cursor value and the total number of events migrated. The
+        cursor value can be used to resume the migration.
+    """
 
     total_events = 0
     last_cursor = None
 
-    async for record in clickhouse_client.iterate(
-        """
+    # If we have a cursor, then we need to resume the migration from the
+    # cursor value.
+    cursor_filter_fragment = (
+        f"""
+        (
+            timestamp >= {py2ch(cursor.timestamp).decode()}
+            -- Use the (mostly probably) unique uuid property to ensure that we
+            -- don't duplicate events.
+            AND uuid > {py2ch(cursor.uuid).decode()}
+        )
+    """
+        if cursor
+        else "(TRUE)"
+    )
+
+    results_range_query = f"""
         SELECT
             uuid,
             event,
             properties,
             timestamp,
             team_id,
-            distinct_id,
-            toDate(timestamp) as date,
-            cityHash64(distinct_id) as distinct_id_hash,
-            cityHash64(uuid) as uuid_hash
+            distinct_id
+
         FROM events
+
+        -- Filter by team ID and date range. We use timestamp to filter by, as
+        -- this is part of the sort key or at least toDate(timestamp) is it
+        -- should be reasonably efficient.
         WHERE
-            team_id = {team_id}
-            AND timestamp >= {start_date}
-            AND timestamp < {end_date}
+            team_id = {py2ch(team_id).decode()}
+            AND timestamp >= {py2ch(start_date).decode()}
+            AND timestamp < {py2ch(end_date).decode()}
+
+            AND ({cursor_filter_fragment})
+
+        -- Order by timestamp to ensure we ingest the data in timestamp order.
+        -- This is important as the order of ingestion affects how person
+        -- properties etc are created.
+        -- 
+        -- Ideally we should order by the sort key to ensure that ClickHouse can
+        -- stream data in a memory efficient way, but this doesn't include the
+        -- timestamp but instead `toDate(timestamp)`. We could reindex the table 
+        -- but for the purposes of this tool, we do not want to introduce too
+        -- many changes to the production database. e.g. if we tried to index we
+        -- might run out of disk space.
+        --
+        -- We also include the uuid. This isn't in the sort key either, so this
+        -- _could_ also be very inefficient.
         ORDER BY
-            team_id,
-            toDate(timestamp),
-            event,
-            cityHash64(distinct_id),
-            cityHash64(uuid)
-        """,
-        params={
-            "team_id": team_id,
-            "start_date": start_date,
-            "end_date": end_date,
-        },
-    ):
+            timestamp,
+            uuid
+    """
+
+    number_of_events_query = f"""
+        SELECT
+            count(*)
+
+        FROM ({results_range_query})
+    """
+
+    # Query the number of events to migrate.
+    logger.debug(
+        "Querying number of events from ClickHouse: %s", number_of_events_query
+    )
+    number_of_events_result = await clickhouse_client.fetchrow(number_of_events_query)
+    assert number_of_events_result is not None
+    number_of_events = number_of_events_result[0]
+
+    logger.info("Migrating %s events", number_of_events)
+
+    logger.debug("Querying events from ClickHouse: %s", results_range_query)
+    record = None
+
+    async for record in clickhouse_client.iterate(results_range_query):
         # Parse the event properties.
         properties = json.loads(record["properties"])
 
@@ -264,27 +424,21 @@ async def migrate_events(
             if not dry_run:
                 posthog_client.flush()
 
-            # Update the last cursor value, which is the entire sort key.
-            last_cursor = (
-                record["team_id"],
-                record["date"],
-                record["event"],
-                record["distinct_id_hash"],
-                record["uuid_hash"],
-            )
-
-            # Output the last cursor value.
-            print(last_cursor)
+            last_cursor = Cursor(timestamp=record["timestamp"], uuid=record["uuid"])
+            print("Cursor: ", marshal_cursor(last_cursor))
 
     # Flush the events to PostHog Cloud.
-    if not dry_run:
+    if record and not dry_run:
         posthog_client.flush()
+
+        last_cursor = Cursor(timestamp=record["timestamp"], uuid=record["uuid"])
+        print("Cursor: ", marshal_cursor(last_cursor))
 
     # Return the last cursor value and the total number of events.
     return last_cursor, total_events
 
 
-async def main(sys_args: Optional[List[str]] = None) -> None:
+async def main(sys_args: Optional[List[str]] = None) -> Tuple[Optional[str], int]:
     """
     The main function.
 
@@ -305,29 +459,41 @@ async def main(sys_args: Optional[List[str]] = None) -> None:
     end_date = get_end_date(args.end_date)
 
     # Get the ClickHouse and PostHog clients.
-    clickhouse_client = get_clickhouse_client(
+    async with get_clickhouse_client(
         host=args.clickhouse_host,
         user=args.clickhouse_user,
         password=args.clickhouse_password,
         database=args.clickhouse_database,
-    )
-    posthog_client = get_posthog_client(
-        host=args.posthog_host, api_token=args.posthog_api_token
-    )
+    ) as clickhouse_client:
+        posthog_client = get_posthog_client(
+            host=args.posthog_host, api_token=args.posthog_api_token
+        )
 
-    # Run the migration.
-    last_cursor, total_events = await migrate_events(
-        clickhouse_client=clickhouse_client,
-        posthog_client=posthog_client,
-        team_id=args.team_id,
-        start_date=start_date,
-        end_date=end_date,
-        batch_size=args.batch_size,
-        dry_run=args.dry_run,
-    )
+        # Run the migration.
+        last_cursor, total_events = await migrate_events(
+            clickhouse_client=clickhouse_client,
+            posthog_client=posthog_client,
+            team_id=args.team_id,
+            start_date=start_date,
+            end_date=end_date,
+            cursor=unmarshal_cursor(args.cursor) if args.cursor else None,
+            batch_size=args.batch_size,
+            dry_run=args.dry_run,
+        )
 
-    # Output the last timestamp and total events to stdout.
-    print(json.dumps({"last_cursor": last_cursor, "total_events": total_events}))
+    # Output the last timestamp and total events to stdout. We want to convert
+    # dates to their isoformat representation, as this is easier to parse.
+    print(
+        json.dumps(
+            {
+                "last_cursor": dataclasses.asdict(last_cursor) if last_cursor else None,
+                "total_events": total_events,
+            },
+            default=lambda o: o.isoformat() if isinstance(o, datetime) else None,
+            indent=4,
+        )
+    )
+    return marshal_cursor(last_cursor) if last_cursor else None, total_events
 
 
 if __name__ == "__main__":
