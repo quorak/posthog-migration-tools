@@ -282,6 +282,7 @@ async def test_can_migrate_events_to_posthog():
 
         # Check we get a cursor back from migrate that we can use in subsequent
         # calls to migrate
+        cursor = None
         with responses.RequestsMock() as rsps:
             rsps.add(
                 responses.POST,
@@ -342,7 +343,7 @@ async def test_can_migrate_events_to_posthog():
                 }
             ]
 
-            assert cursor
+        assert cursor
 
         # Now use the cursor to get the second event only
         with responses.RequestsMock() as rsps:
