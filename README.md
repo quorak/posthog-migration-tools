@@ -79,7 +79,7 @@ be ok.
 Note that increasing `--fetch-limit` may reduce the load on the cluster due to
 the reduced duplication of query execution, assuming you've got enough memory.
 
-# Performance isn't as good as it should be
+## Performance isn't as good as it should be
 
 Due to the above limitation around time ordering, we need to perform some
 expensive queries which do not support streaming and as such it is not as
