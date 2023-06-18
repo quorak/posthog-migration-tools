@@ -22,14 +22,12 @@ import contextlib
 import dataclasses
 import json
 import logging
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 import sys
 from typing import Any, List, Optional, Tuple
 from uuid import UUID
 
 from aiochclient import ChClient
-
-from aiochclient.types import py2ch
 
 from posthog import Posthog
 
@@ -155,13 +153,13 @@ def get_posthog_client(host: str, api_token: str) -> Posthog:
 def get_start_date(start_date: Optional[str]) -> datetime:
     """
     Get the start date to migrate from. If no start date is provided, we default
-    to 30 days ago.
+    to 30 days ago. We parse as UTC.
 
     :param start_date: The start date to migrate from.
     :return: The start date to migrate from.
     """
     if start_date:
-        return datetime.fromisoformat(start_date)
+        return datetime.fromisoformat(start_date).replace(tzinfo=None)
     return datetime.now() - timedelta(days=30)
 
 
@@ -174,7 +172,7 @@ def get_end_date(end_date: Optional[str]) -> datetime:
     :return: The end date to migrate to.
     """
     if end_date:
-        return datetime.fromisoformat(end_date)
+        return datetime.fromisoformat(end_date).replace(tzinfo=None)
     return datetime.now()
 
 
@@ -189,7 +187,7 @@ class Cursor:
     key.
     """
 
-    timestamp: date
+    timestamp: int
     uuid: UUID
 
 
@@ -203,7 +201,7 @@ def marshal_cursor(cursor: Cursor) -> str:
     return base64.b64encode(
         json.dumps(
             {
-                "timestamp": cursor.timestamp.isoformat(),
+                "timestamp": cursor.timestamp,
                 "uuid": int(cursor.uuid),
             }
         ).encode()
@@ -220,7 +218,7 @@ def unmarshal_cursor(cursor: str) -> "Cursor":
     decoded = base64.b64decode(cursor.encode())
     json_data = json.loads(decoded)
     return Cursor(
-        timestamp=datetime.fromisoformat(json_data["timestamp"]),
+        timestamp=json_data["timestamp"],
         uuid=UUID(int=json_data["uuid"]),
     )
 
@@ -322,85 +320,79 @@ async def migrate_events(
     """
 
     total_events = 0
-
-    results_range_query = f"""
-        SELECT
-            uuid,
-            event,
-            properties,
-            timestamp,
-            team_id,
-            distinct_id
-
-        FROM events
-
-        -- Filter by team ID and date range. We use timestamp to filter by, as
-        -- this is part of the sort key or at least toDate(timestamp) is it
-        -- should be reasonably efficient.
-        WHERE
-            team_id = {py2ch(team_id).decode()}
-            AND timestamp >= {py2ch(start_date).decode()}
-            AND timestamp < {py2ch(end_date).decode()}
-
-        -- Order by timestamp to ensure we ingest the data in timestamp order.
-        -- This is important as the order of ingestion affects how person
-        -- properties etc are created.
-        -- 
-        -- Ideally we should order by the sort key to ensure that ClickHouse can
-        -- stream data in a memory efficient way, but this doesn't include the
-        -- timestamp but instead `toDate(timestamp)`. We could reindex the table 
-        -- but for the purposes of this tool, we do not want to introduce too
-        -- many changes to the production database. e.g. if we tried to index we
-        -- might run out of disk space.
-        --
-        -- We also include the uuid. This isn't in the sort key either, so this
-        -- _could_ also be very inefficient.
-        ORDER BY
-            timestamp,
-            uuid
-    """
-
-    number_of_events_query = f"""
-        SELECT
-            count(*)
-
-        FROM ({results_range_query})
-    """
-
-    # Query the number of events to migrate.
-    logger.debug(
-        "Querying number of events from ClickHouse: %s", number_of_events_query
-    )
-    number_of_events_result = await clickhouse_client.fetchrow(number_of_events_query)
-    assert number_of_events_result is not None
-    number_of_events = number_of_events_result[0]
-
-    logger.info("Migrating %s events", number_of_events)
-
-    logger.debug("Querying events from ClickHouse: %s", results_range_query)
     records = []
     committed_cursor = cursor
 
     while True:
         # If we have a cursor, then we need to resume the migration from the
         # cursor value.
-        cursor_filter_fragment = (
-            f"""
-            (
-                timestamp >= {py2ch(cursor.timestamp).decode()}
+        results_range_query = f"""
+            SELECT
+                uuid,
+                event,
+                properties,
+                toInt64(timestamp) AS timestamp,
+                team_id,
+                distinct_id
+
+            FROM events
+
+            -- Filter by team ID and date range. We use timestamp to filter by, as
+            -- this is part of the sort key or at least toDate(timestamp) is it
+            -- should be reasonably efficient.
+            WHERE
+                team_id = {team_id}
+                AND timestamp >= toDateTime64({int(start_date.timestamp())}, 6)
+                AND timestamp < toDateTime64({int(end_date.timestamp())}, 6)
+
+                -- Use >= timestamp to ensure we don't miss any events. 
                 -- Use the (mostly probably) unique uuid property to ensure that we
                 -- don't duplicate events.
-                AND uuid > {py2ch(cursor.uuid).decode()}
-            )
+                AND (timestamp, uuid) > (
+                    toDateTime64({(int(cursor.timestamp) if cursor else 0)}, 6), 
+                    toUUID('{str(cursor.uuid) if cursor else '00000000-0000-0000-0000-000000000000'}')
+                )
+
+            -- Order by timestamp to ensure we ingest the data in timestamp order.
+            -- This is important as the order of ingestion affects how person
+            -- properties etc are created.
+            -- 
+            -- Ideally we should order by the sort key to ensure that ClickHouse can
+            -- stream data in a memory efficient way, but this doesn't include the
+            -- timestamp but instead `toDate(timestamp)`. We could reindex the table 
+            -- but for the purposes of this tool, we do not want to introduce too
+            -- many changes to the production database. e.g. if we tried to index we
+            -- might run out of disk space.
+            --
+            -- We also include the uuid. This isn't in the sort key either, so this
+            -- _could_ also be very inefficient.
+            ORDER BY
+                timestamp,
+                uuid
         """
-            if cursor
-            else "(TRUE)"
+
+        number_of_events_query = f"""
+            SELECT
+                count(*)
+
+            FROM ({results_range_query})
+        """
+
+        # Query the number of events to migrate.
+        logger.debug(
+            "Querying number of events from ClickHouse: %s", number_of_events_query
         )
+        number_of_events_result = await clickhouse_client.fetchrow(
+            number_of_events_query
+        )
+        assert number_of_events_result is not None
+        number_of_events = number_of_events_result[0]
+
+        logger.info("Migrating %s events", number_of_events)
 
         results_batch_query = f"""
             SELECT *
             FROM ({results_range_query})
-            WHERE {cursor_filter_fragment}
 
             -- As we cannot use the sort key to time order the data and thus take 
             -- advantage of streaming, we need to limit the amount of data ClickHouse 
@@ -412,6 +404,7 @@ async def migrate_events(
 
         logger.debug("Querying events from ClickHouse: %s", results_batch_query)
         records = await clickhouse_client.fetch(results_batch_query)
+
         if not records:
             break
 
@@ -424,7 +417,7 @@ async def migrate_events(
                 posthog_client.capture(
                     distinct_id=record["distinct_id"],
                     event=record["event"],
-                    timestamp=record["timestamp"],
+                    timestamp=datetime.fromtimestamp(record["timestamp"]),
                     properties=properties,
                 )
 
