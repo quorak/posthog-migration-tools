@@ -6,9 +6,10 @@ We provide a bulk export functionality to allow users to migrate from
 self-hosted to Cloud deployments using e.g. the Replicator App. This can be
 slow and unreliable.
 
-Run something like:
+Git clone this repo and run something like:
 
 ```bash
+pip3 install -r requirements.txt
 python3 ./migrate.py \
    --clickhouse-url https://some.clickhouse.cluster:8443 \
    --clickhouse-user default \
