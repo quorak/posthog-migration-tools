@@ -28,6 +28,7 @@ from typing import Any, List, Optional, Tuple
 from uuid import UUID
 
 from aiochclient import ChClient
+import aiohttp
 
 from posthog import Posthog
 
@@ -106,7 +107,7 @@ def parse_args(sys_args: Optional[List[str]] = None) -> argparse.Namespace:
     parser.add_argument(
         "--batch-size",
         type=int,
-        default=1000,
+        default=100,
         help="The number of events to batch together when sending to PostHog.",
     )
     parser.add_argument(
@@ -134,9 +135,23 @@ async def get_clickhouse_client(url: str, user: str, password: str, database: st
     :param database: The database to use to connect to ClickHouse.
     :return: A ClickHouse client.
     """
-    client = ChClient(url=url, user=user, password=password, database=database)
-    yield client
-    await client.close()
+    connector = aiohttp.TCPConnector(
+        # Without this I was getting the error: "ServerDisconnectedError" when
+        # running without `--dry-run`. With `--dry-run` it worked fine, I'm not
+        # sure why.
+        force_close=True
+    )
+    async with aiohttp.ClientSession(connector=connector) as session:
+        client = ChClient(
+            session=session,
+            url=url,
+            user=user,
+            password=password,
+            database=database,
+            compress_response=True,
+        )
+        yield client
+        await client.close()
 
 
 def get_posthog_client(url: str, api_token: str) -> Posthog:
