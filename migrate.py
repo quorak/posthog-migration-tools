@@ -193,7 +193,7 @@ class Cursor:
     uuid: UUID
 
 
-def marshal_cursor(cursor) -> str:
+def marshal_cursor(cursor: Cursor) -> str:
     """
     Convert the cursor to a string. This string can be used to resume a
     migration. We encode dates as ISO 8601 strings.
@@ -378,7 +378,6 @@ async def migrate_events(
     logger.info("Migrating %s events", number_of_events)
 
     logger.debug("Querying events from ClickHouse: %s", results_range_query)
-    record = None
     records = []
     committed_cursor = cursor
 
@@ -443,11 +442,11 @@ async def migrate_events(
                 print("Cursor: ", marshal_cursor(committed_cursor))
 
     # Flush the events to PostHog Cloud.
-    if record and not dry_run:
+    if not dry_run:
         posthog_client.flush()
 
-        committed_cursor = cursor
-        print("Cursor: ", marshal_cursor(committed_cursor))
+    committed_cursor = cursor
+    print("Cursor: ", marshal_cursor(committed_cursor) if committed_cursor else None)
 
     # Return the last cursor value and the total number of events.
     return committed_cursor, total_events
