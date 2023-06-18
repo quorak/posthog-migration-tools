@@ -1,6 +1,6 @@
 # PostHog self hosted migration tools
 
-## TLDR
+## TL;DR
 
 We provide a bulk export functionality to allow users to migrate from
 self-hosted to Cloud deployments using e.g. the Replicator App. This can be
@@ -42,7 +42,7 @@ python3 ./migrate.py \
 
 Run `python3 ./migrate.py --help` to get a complete list of options.
 
-## What it does
+## What it does
 
 To aid in getting people moved over, this tool:
 
