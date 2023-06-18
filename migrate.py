@@ -77,7 +77,7 @@ def parse_args(sys_args: Optional[List[str]] = None) -> argparse.Namespace:
         help="The team ID to migrate events for.",
     )
     parser.add_argument(
-        "--posthog-host",
+        "--posthog-url",
         type=str,
         required=True,
         help="The host of the PostHog instance to migrate to.",
@@ -139,15 +139,15 @@ async def get_clickhouse_client(url: str, user: str, password: str, database: st
     await client.close()
 
 
-def get_posthog_client(host: str, api_token: str) -> Posthog:
+def get_posthog_client(url: str, api_token: str) -> Posthog:
     """
     Get a PostHog client. This client is used to send events to PostHog Cloud.
 
-    :param host: The host of the PostHog instance to connect to.
+    :param url: The url of the PostHog instance to connect to.
     :param api_token: The API token to use to connect to PostHog.
     :return: A PostHog client.
     """
-    return Posthog(api_key=api_token, host=host)
+    return Posthog(api_key=api_token, host=url)
 
 
 def get_start_date(start_date: Optional[str]) -> datetime:
@@ -473,7 +473,7 @@ async def main(sys_args: Optional[List[str]] = None) -> Tuple[Optional[str], int
         database=args.clickhouse_database,
     ) as clickhouse_client:
         posthog_client = get_posthog_client(
-            host=args.posthog_host, api_token=args.posthog_api_token
+            url=args.posthog_url, api_token=args.posthog_api_token
         )
 
         # Run the migration.
