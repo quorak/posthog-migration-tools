@@ -322,22 +322,6 @@ async def migrate_events(
     """
 
     total_events = 0
-    last_cursor = None
-
-    # If we have a cursor, then we need to resume the migration from the
-    # cursor value.
-    cursor_filter_fragment = (
-        f"""
-        (
-            timestamp >= {py2ch(cursor.timestamp).decode()}
-            -- Use the (mostly probably) unique uuid property to ensure that we
-            -- don't duplicate events.
-            AND uuid > {py2ch(cursor.uuid).decode()}
-        )
-    """
-        if cursor
-        else "(TRUE)"
-    )
 
     results_range_query = f"""
         SELECT
@@ -357,8 +341,6 @@ async def migrate_events(
             team_id = {py2ch(team_id).decode()}
             AND timestamp >= {py2ch(start_date).decode()}
             AND timestamp < {py2ch(end_date).decode()}
-
-            AND ({cursor_filter_fragment})
 
         -- Order by timestamp to ensure we ingest the data in timestamp order.
         -- This is important as the order of ingestion affects how person
@@ -397,40 +379,78 @@ async def migrate_events(
 
     logger.debug("Querying events from ClickHouse: %s", results_range_query)
     record = None
+    records = []
+    committed_cursor = cursor
 
-    async for record in clickhouse_client.iterate(results_range_query):
-        # Parse the event properties.
-        properties = json.loads(record["properties"])
-
-        # Send the event to PostHog Cloud.
-        if not dry_run:
-            posthog_client.capture(
-                distinct_id=record["distinct_id"],
-                event=record["event"],
-                timestamp=record["timestamp"],
-                properties=properties,
+    while True:
+        # If we have a cursor, then we need to resume the migration from the
+        # cursor value.
+        cursor_filter_fragment = (
+            f"""
+            (
+                timestamp >= {py2ch(cursor.timestamp).decode()}
+                -- Use the (mostly probably) unique uuid property to ensure that we
+                -- don't duplicate events.
+                AND uuid > {py2ch(cursor.uuid).decode()}
             )
+        """
+            if cursor
+            else "(TRUE)"
+        )
 
-        # Increment the total number of events.
-        total_events += 1
+        results_batch_query = f"""
+            SELECT *
+            FROM ({results_range_query})
+            WHERE {cursor_filter_fragment}
 
-        # Flush the events to PostHog Cloud.
-        if total_events % batch_size == 0:
+            -- As we cannot use the sort key to time order the data and thus take 
+            -- advantage of streaming, we need to limit the amount of data ClickHouse 
+            -- will need to store in memory. It's not the most efficient way to do
+            -- this, but it's the best we can do without reindexing the table or 
+            -- similar.
+            LIMIT 1000
+        """
+
+        logger.debug("Querying events from ClickHouse: %s", results_batch_query)
+        records = await clickhouse_client.fetch(results_batch_query)
+        if not records:
+            break
+
+        for record in records:
+            # Parse the event properties.
+            properties = json.loads(record["properties"])
+
+            # Send the event to PostHog Cloud.
             if not dry_run:
-                posthog_client.flush()
+                posthog_client.capture(
+                    distinct_id=record["distinct_id"],
+                    event=record["event"],
+                    timestamp=record["timestamp"],
+                    properties=properties,
+                )
 
-            last_cursor = Cursor(timestamp=record["timestamp"], uuid=record["uuid"])
-            print("Cursor: ", marshal_cursor(last_cursor))
+            cursor = Cursor(timestamp=record["timestamp"], uuid=record["uuid"])
+
+            # Increment the total number of events.
+            total_events += 1
+
+            # Flush the events to PostHog Cloud.
+            if total_events % batch_size == 0:
+                if not dry_run:
+                    posthog_client.flush()
+
+                committed_cursor = cursor
+                print("Cursor: ", marshal_cursor(committed_cursor))
 
     # Flush the events to PostHog Cloud.
     if record and not dry_run:
         posthog_client.flush()
 
-        last_cursor = Cursor(timestamp=record["timestamp"], uuid=record["uuid"])
-        print("Cursor: ", marshal_cursor(last_cursor))
+        committed_cursor = cursor
+        print("Cursor: ", marshal_cursor(committed_cursor))
 
     # Return the last cursor value and the total number of events.
-    return last_cursor, total_events
+    return committed_cursor, total_events
 
 
 async def main(sys_args: Optional[List[str]] = None) -> Tuple[Optional[str], int]:
@@ -465,7 +485,7 @@ async def main(sys_args: Optional[List[str]] = None) -> Tuple[Optional[str], int
         )
 
         # Run the migration.
-        last_cursor, total_events = await migrate_events(
+        committed_cursor, total_events = await migrate_events(
             clickhouse_client=clickhouse_client,
             posthog_client=posthog_client,
             team_id=args.team_id,
@@ -481,14 +501,16 @@ async def main(sys_args: Optional[List[str]] = None) -> Tuple[Optional[str], int
     print(
         json.dumps(
             {
-                "last_cursor": dataclasses.asdict(last_cursor) if last_cursor else None,
+                "committed_cursor": dataclasses.asdict(committed_cursor)
+                if committed_cursor
+                else None,
                 "total_events": total_events,
             },
             default=lambda o: o.isoformat() if isinstance(o, datetime) else None,
             indent=4,
         )
     )
-    return marshal_cursor(last_cursor) if last_cursor else None, total_events
+    return marshal_cursor(committed_cursor) if committed_cursor else None, total_events
 
 
 if __name__ == "__main__":
