@@ -49,7 +49,7 @@ def parse_args(sys_args: Optional[List[str]] = None) -> argparse.Namespace:
         description="Migrate data from ClickHouse to PostHog Cloud. This tool is intended to be used for self-hosted instances of PostHog."
     )
     parser.add_argument(
-        "--clickhouse-host",
+        "--clickhouse-url",
         type=str,
         required=True,
         help="The host of the ClickHouse instance to migrate from.",
@@ -125,23 +125,18 @@ def parse_args(sys_args: Optional[List[str]] = None) -> argparse.Namespace:
 
 
 @contextlib.asynccontextmanager
-async def get_clickhouse_client(host: str, user: str, password: str, database: str):
+async def get_clickhouse_client(url: str, user: str, password: str, database: str):
     """
     Get a ClickHouse client. This client is used to stream events from
-    ClickHouse. Note that we don't support e.g. SSL connections to ClickHouse or
-    any other advanced configuration. The client is intended to be used e.g.
-    against a port-forwarded ClickHouse instance hosted on a Kubernetes cluster
-    i.e. how existing self-hosted instances of PostHog are configured.
+    ClickHouse.
 
-    :param host: The host of the ClickHouse instance to connect to.
+    :param url: The host of the ClickHouse instance to migrate from.
     :param user: The user to use to connect to ClickHouse.
     :param password: The password to use to connect to ClickHouse.
     :param database: The database to use to connect to ClickHouse.
     :return: A ClickHouse client.
     """
-    client = ChClient(
-        url=f"http://{host}:8123/", user=user, password=password, database=database
-    )
+    client = ChClient(url=url, user=user, password=password, database=database)
     yield client
     await client.close()
 
@@ -460,7 +455,7 @@ async def main(sys_args: Optional[List[str]] = None) -> Tuple[Optional[str], int
 
     # Get the ClickHouse and PostHog clients.
     async with get_clickhouse_client(
-        host=args.clickhouse_host,
+        url=args.clickhouse_url,
         user=args.clickhouse_user,
         password=args.clickhouse_password,
         database=args.clickhouse_database,

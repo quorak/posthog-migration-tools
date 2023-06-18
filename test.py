@@ -142,8 +142,8 @@ async def test_can_migrate_events_to_posthog():
 
             await main(
                 sys_args=[
-                    "--clickhouse-host",
-                    "localhost",
+                    "--clickhouse-url",
+                    "http://localhost:8123",
                     "--clickhouse-user",
                     "default",
                     "--clickhouse-password",
@@ -194,8 +194,8 @@ async def test_can_migrate_events_to_posthog():
         with responses.RequestsMock() as rsps:
             await main(
                 sys_args=[
-                    "--clickhouse-host",
-                    "localhost",
+                    "--clickhouse-url",
+                    "http://localhost:8123",
                     "--clickhouse-user",
                     "default",
                     "--clickhouse-password",
@@ -224,8 +224,8 @@ async def test_can_migrate_events_to_posthog():
         with responses.RequestsMock() as rsps:
             await main(
                 sys_args=[
-                    "--clickhouse-host",
-                    "localhost",
+                    "--clickhouse-url",
+                    "http://localhost:8123",
                     "--clickhouse-user",
                     "default",
                     "--clickhouse-password",
@@ -254,8 +254,8 @@ async def test_can_migrate_events_to_posthog():
         with responses.RequestsMock() as rsps:
             await main(
                 sys_args=[
-                    "--clickhouse-host",
-                    "localhost",
+                    "--clickhouse-url",
+                    "http://localhost:8123",
                     "--clickhouse-user",
                     "default",
                     "--clickhouse-password",
@@ -293,8 +293,8 @@ async def test_can_migrate_events_to_posthog():
 
             cursor, _ = await main(
                 sys_args=[
-                    "--clickhouse-host",
-                    "localhost",
+                    "--clickhouse-url",
+                    "http://localhost:8123",
                     "--clickhouse-user",
                     "default",
                     "--clickhouse-password",
@@ -356,8 +356,8 @@ async def test_can_migrate_events_to_posthog():
 
             await main(
                 sys_args=[
-                    "--clickhouse-host",
-                    "localhost",
+                    "--clickhouse-url",
+                    "http://localhost:8123",
                     "--clickhouse-user",
                     "default",
                     "--clickhouse-password",
