@@ -105,6 +105,12 @@ def parse_args(sys_args: Optional[List[str]] = None) -> argparse.Namespace:
         help="The cursor to start migrating from. If provided, this will override the start date.",
     )
     parser.add_argument(
+        "--fetch-limit",
+        type=int,
+        default=1000,
+        help="The number of events to fetch from ClickHouse at a time.",
+    )
+    parser.add_argument(
         "--batch-size",
         type=int,
         default=100,
@@ -245,6 +251,7 @@ async def migrate_events(
     start_date: datetime,
     end_date: datetime,
     cursor: Optional[Cursor],
+    fetch_limit: int,
     batch_size: int,
     dry_run: bool,
 ) -> Tuple[Any, int]:
@@ -414,7 +421,7 @@ async def migrate_events(
             -- will need to store in memory. It's not the most efficient way to do
             -- this, but it's the best we can do without reindexing the table or 
             -- similar.
-            LIMIT 1000
+            LIMIT {fetch_limit}
         """
 
         logger.debug("Querying events from ClickHouse: %s", results_batch_query)
@@ -499,6 +506,7 @@ async def main(sys_args: Optional[List[str]] = None) -> Tuple[Optional[str], int
             start_date=start_date,
             end_date=end_date,
             cursor=unmarshal_cursor(args.cursor) if args.cursor else None,
+            fetch_limit=args.fetch_limit,
             batch_size=args.batch_size,
             dry_run=args.dry_run,
         )
