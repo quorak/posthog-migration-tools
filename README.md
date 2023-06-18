@@ -58,7 +58,7 @@ else that was already there.
 
 # Caveats
 
-## Memory usage isn't optimal
+## Memory usage isn't optimal
 
 How do we efficiently handle ingesting in time order. The sort key for the
 `events` table in ClickHouse concatenates the event `timestamp` to a day so
@@ -78,3 +78,17 @@ be ok.
 
 Note that increasing `--fetch-limit` may reduce the load on the cluster due to
 the reduced duplication of query execution, assuming you've got enough memory.
+
+# Performance isn't as good as it should be
+
+Due to the above limitation around time ordering, we need to perform some
+expensive queries which do not support streaming and as such it is not as
+performant as I would like. It's possible that we could either:
+
+1. write the data to a new table with a refined sort key, although this risks
+   e.g. disk space issues.
+2. offer a way to drop the time ordering requirement. Perhaps some do not need
+   to worry about this.
+3. identify a subset of events that need to be in time order and do these first,
+   then do the rest. This will however break point in time person properties
+   that are denormalized onto events at ingestion time.
