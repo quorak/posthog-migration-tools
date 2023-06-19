@@ -1,4 +1,4 @@
-# PostHog self hosted migration tools
+# PostHog self hosted migration tools (Alpha)
 
 ## TL;DR
 
