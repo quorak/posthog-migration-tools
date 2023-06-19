@@ -1,4 +1,4 @@
-# PostHog self hosted migration tools (Alpha)
+# PostHog self hosted migration tools (Alpha) [![.github/workflows/test.yml](https://github.com/PostHog/posthog-migration-tools/actions/workflows/test.yml/badge.svg)](https://github.com/PostHog/posthog-migration-tools/actions/workflows/test.yml)
 
 ## TL;DR
 
