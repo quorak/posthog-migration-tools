@@ -22,14 +22,14 @@ import contextlib
 import dataclasses
 import json
 import logging
-from datetime import datetime, timedelta
+import re
 import sys
+from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional, Tuple
 from uuid import UUID
 
-from aiochclient import ChClient
 import aiohttp
-
+from aiochclient import ChClient
 from posthog import Posthog
 
 logging.basicConfig()
@@ -160,15 +160,16 @@ async def get_clickhouse_client(url: str, user: str, password: str, database: st
         await client.close()
 
 
-def get_posthog_client(url: str, api_token: str) -> Posthog:
+def get_posthog_client(url: str, api_token: str, debug: bool) -> Posthog:
     """
     Get a PostHog client. This client is used to send events to PostHog Cloud.
 
     :param url: The url of the PostHog instance to connect to.
     :param api_token: The API token to use to connect to PostHog.
+    :param debug: Whether to log payloads to stdout
     :return: A PostHog client.
     """
-    return Posthog(api_key=api_token, host=url)
+    return Posthog(api_key=api_token, host=url, debug=debug)
 
 
 def get_start_date(start_date: Optional[str]) -> datetime:
@@ -242,6 +243,69 @@ def unmarshal_cursor(cursor: str) -> "Cursor":
         timestamp=json_data["timestamp"],
         uuid=UUID(int=json_data["uuid"]),
     )
+
+
+def elements_chain_to_elements(elements_chain: str) -> list[dict]:
+    """
+    Parses the elements_chain string into a list of objects that will be correctly parsed
+    by ingestion. The output format is built by observing how it is read by
+    https://github.com/PostHog/posthog/blob/master/plugin-server/src/utils/db/elements-chain.ts
+    """
+    elements = []
+
+    split_chain_regex = re.compile(r'(?:[^\s;"]|"(?:\\.|[^"])*")+')
+    split_class_attributes_regex = re.compile(
+        r"(.*?)($|:([a-zA-Z\-_0-9]*=.*))", flags=re.MULTILINE
+    )
+    parse_attributes_regex = re.compile(r'((.*?)="(.*?[^\\])")')
+
+    elements_chain = elements_chain.replace("\n", "")
+
+    for match in re.finditer(split_chain_regex, elements_chain):
+        class_attributes = re.search(split_class_attributes_regex, match.group(0))
+
+        attributes = {}
+        if class_attributes is not None:
+            try:
+                attributes = {
+                    m[2]: m[3]
+                    for m in re.finditer(
+                        parse_attributes_regex, class_attributes.group(3)
+                    )
+                }
+            except IndexError:
+                pass
+
+        element = {}
+
+        if class_attributes is not None:
+            try:
+                tag_and_class = class_attributes.group(1).split(".")
+            except IndexError:
+                pass
+            else:
+                element["tag_name"] = tag_and_class.pop(0)
+                if len(tag_and_class) > 0:
+                    element["attr__class"] = tag_and_class
+
+        for key, value in attributes.items():
+            match key:
+                case "href":
+                    element["attr__href"] = value
+                case "nth-child":
+                    element["nth_child"] = int(value)
+                case "nth-of-type":
+                    element["nth_of_type"] = int(value)
+                case "text":
+                    element["$el_text"] = value
+                case "attr_id":
+                    element["attr__id"] = value
+                case k:
+                    element[k] = value
+
+        elements.append(element)
+
+    return elements
 
 
 async def migrate_events(
@@ -355,7 +419,8 @@ async def migrate_events(
                 properties,
                 toInt64(timestamp) AS timestamp,
                 team_id,
-                distinct_id
+                distinct_id,
+                elements_chain
 
             FROM events
 
@@ -367,21 +432,21 @@ async def migrate_events(
                 AND timestamp >= toDateTime64({int(start_date.timestamp())}, 6)
                 AND timestamp < toDateTime64({int(end_date.timestamp())}, 6)
 
-                -- Use >= timestamp to ensure we don't miss any events. 
+                -- Use >= timestamp to ensure we don't miss any events.
                 -- Use the (mostly probably) unique uuid property to ensure that we
                 -- don't duplicate events.
                 AND (timestamp, uuid) > (
-                    toDateTime64({(int(cursor.timestamp) if cursor else 0)}, 6), 
+                    toDateTime64({(int(cursor.timestamp) if cursor else 0)}, 6),
                     toUUID('{str(cursor.uuid) if cursor else '00000000-0000-0000-0000-000000000000'}')
                 )
 
             -- Order by timestamp to ensure we ingest the data in timestamp order.
             -- This is important as the order of ingestion affects how person
             -- properties etc are created.
-            -- 
+            --
             -- Ideally we should order by the sort key to ensure that ClickHouse can
             -- stream data in a memory efficient way, but this doesn't include the
-            -- timestamp but instead `toDate(timestamp)`. We could reindex the table 
+            -- timestamp but instead `toDate(timestamp)`. We could reindex the table
             -- but for the purposes of this tool, we do not want to introduce too
             -- many changes to the production database. e.g. if we tried to index we
             -- might run out of disk space.
@@ -416,10 +481,10 @@ async def migrate_events(
             SELECT *
             FROM ({results_range_query})
 
-            -- As we cannot use the sort key to time order the data and thus take 
-            -- advantage of streaming, we need to limit the amount of data ClickHouse 
+            -- As we cannot use the sort key to time order the data and thus take
+            -- advantage of streaming, we need to limit the amount of data ClickHouse
             -- will need to store in memory. It's not the most efficient way to do
-            -- this, but it's the best we can do without reindexing the table or 
+            -- this, but it's the best we can do without reindexing the table or
             -- similar.
             LIMIT {fetch_limit}
         """
@@ -434,12 +499,18 @@ async def migrate_events(
             # Parse the event properties.
             properties = json.loads(record["properties"])
 
+            if (
+                record["event"] == "$autocapture"
+                and record.get("elements_chain", None) is not None
+            ):
+                properties["$elements"] = elements_chain_to_elements(record["elements_chain"])
+
             # Send the event to PostHog Cloud.
             if not dry_run:
                 posthog_client.capture(
                     distinct_id=record["distinct_id"],
                     event=record["event"],
-                    timestamp=datetime.fromtimestamp(record["timestamp"]),
+                    timestamp=datetime.fromtimestamp(record["timestamp"], tz=timezone.utc),
                     properties=properties,
                 )
 
@@ -495,7 +566,7 @@ async def main(sys_args: Optional[List[str]] = None) -> Tuple[Optional[str], int
         database=args.clickhouse_database,
     ) as clickhouse_client:
         posthog_client = get_posthog_client(
-            url=args.posthog_url, api_token=args.posthog_api_token
+            url=args.posthog_url, api_token=args.posthog_api_token, debug=args.verbose
         )
 
         # Run the migration.

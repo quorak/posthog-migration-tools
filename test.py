@@ -1,9 +1,11 @@
-import json
-from migrate import main
-from aiochclient import ChClient
-import responses
-import pytest
 import datetime
+import json
+
+import pytest
+import responses
+from aiochclient import ChClient
+
+from migrate import elements_chain_to_elements, main
 
 
 @pytest.mark.asyncio
@@ -75,6 +77,7 @@ async def test_can_migrate_events_to_posthog():
                 team_id,
                 "00000000-0000-0000-0000-000000000000",
                 datetime.datetime(2021, 5, 5, 16, 0, 0),
+                """strong.pricingpage:attr__class="pricingpage"nth-child="1"nth-of-type="1"text="A question?";""",
                 datetime.datetime(2021, 5, 5, 16, 0, 0),
                 0,
             ),
@@ -126,6 +129,7 @@ async def test_can_migrate_events_to_posthog():
                 team_id,
                 "00000000-0000-0000-0000-000000000000",
                 datetime.datetime(2021, 5, 5, 16, 2, 0),
+                """strong.pricingpage:attr__class="pricingpage"nth-child="1"nth-of-type="1"text="A question?";""",
                 datetime.datetime(2021, 5, 5, 16, 2, 0),
                 1,
             ),
@@ -431,6 +435,7 @@ async def setup_clickhouse_schema(client: ChClient):
             `team_id` Int64,
             `distinct_id` String,
             `created_at` DateTime64(6, 'UTC'),
+            `elements_chain` VARCHAR,
             `_timestamp` DateTime,
             `_offset` UInt64,
         ) ENGINE = ReplacingMergeTree(
@@ -445,3 +450,75 @@ async def setup_clickhouse_schema(client: ChClient):
             )
          """
     )
+
+
+@pytest.mark.parametrize(
+    "elements_chain,expected",
+    [
+        (
+            """strong.pricingpage:attr__class="pricingpage"nth-child="1"nth-of-type="1"text="A question?";""",
+            [
+                {
+                    "tag_name": "strong",
+                    "attr__class": "pricingpage",
+                    "nth_child": 1,
+                    "nth_of_type": 1,
+                    "$el_text": "A question?",
+                }
+            ],
+        ),
+        (
+            """
+            div:attr__id="gatsby-focus-wrapper"attr__style="outline:none"attr__tabindex="-1"attr_id="gatsby-focus-wrapper"nth-child="1"nth-of-type="1";div:attr__id="___gatsby"attr_id="___gatsby"nth-child="3"nth-of-type="1";body.dark:attr__class="dark"nth-child="2"nth-of-type="1"
+            """,
+            [
+                {
+                    'attr__id': 'gatsby-focus-wrapper',
+                    'attr__style': 'outline:none',
+                    'attr__tabindex': '-1',
+                    'nth_child': 1,
+                    'nth_of_type': 1,
+                    'tag_name': 'div'
+                },
+                {
+                    'attr__id': '___gatsby',
+                    'nth_child': 3,
+                    'nth_of_type': 1,
+                    'tag_name': 'div'
+                },
+                {
+                    'attr__class': 'dark',
+                    'nth_child': 2,
+                    'nth_of_type': 1,
+                    'tag_name': 'body'
+                }
+            ]
+        ), (
+            'button.LemonButton.LemonButton--has-icon.LemonButton--has-side-icon.LemonButton--secondary.LemonButton'
+            '--small.LemonButton--status-stealth:attr__aria-disabled="false"attr__aria-haspopup="true"attr__class='
+            '"LemonButton LemonButton--secondary LemonButton--status-stealth LemonButton--small LemonButton--has-icon '
+            'LemonButton--has-side-icon"attr__data-attr="date-filter"attr__id="daterange_selector"attr__type="button'
+            '"attr_id="daterange_selector"nth-child="2"nth-of-type="1"text="Last 7 days"',
+            [
+                {
+                    'attr__aria-disabled': 'false',
+                    'attr__aria-haspopup': 'true',
+                    'attr__class': 'LemonButton LemonButton--secondary LemonButton--status-stealth '
+                                   'LemonButton--small LemonButton--has-icon '
+                                   'LemonButton--has-side-icon',
+                    'attr__data-attr': 'date-filter',
+                    'attr__id': 'daterange_selector',
+                    'attr__type': 'button',
+                    'nth_child': 2,
+                    'nth_of_type': 1,
+                    'tag_name': 'button',
+                    '$el_text': 'Last 7 days'
+                },
+            ]
+        )
+    ],
+)
+def test_elements_chain_to_elements(elements_chain, expected):
+    db_elements = elements_chain_to_elements(elements_chain)
+
+    assert db_elements == expected
