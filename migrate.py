@@ -266,15 +266,15 @@ def elements_chain_to_elements(elements_chain: str) -> list[dict]:
 
         attributes = {}
         if class_attributes is not None:
-            try:
-                attributes = {
-                    m[2]: m[3]
-                    for m in re.finditer(
-                        parse_attributes_regex, class_attributes.group(3)
-                    )
-                }
-            except IndexError:
-                pass
+            class_attributes_str = class_attributes.group(3)
+            if class_attributes_str is not None:
+                try:
+                    attributes = {
+                        m[2]: m[3]
+                        for m in re.finditer(parse_attributes_regex, class_attributes_str)
+                    }
+                except IndexError:
+                    pass
 
         element = {}
 
@@ -288,6 +288,16 @@ def elements_chain_to_elements(elements_chain: str) -> list[dict]:
                 if len(tag_and_class) > 0:
                     element["attr__class"] = tag_and_class
 
+        
+        def is_valid_html_element(element_name):
+            pattern = r'^[a-zA-Z][\w-]*$'
+            return bool(re.match(pattern, element_name))
+        
+        if not is_valid_html_element(element["tag_name"]):
+            print("ERROR: Invalid tag_name. skipping next elements: ", element["tag_name"][:100])
+            element["tag_name"] = "invalid"
+            break
+        
         for key, value in attributes.items():
             match key:
                 case "href":
@@ -300,6 +310,8 @@ def elements_chain_to_elements(elements_chain: str) -> list[dict]:
                     element["$el_text"] = value
                 case "attr_id":
                     element["attr__id"] = value
+                case "attr__data-react-props":
+                    element["attr__data-react-props"] = "removed"
                 case k:
                     element[k] = value
 
